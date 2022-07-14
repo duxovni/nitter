@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-import asyncdispatch, strutils, strformat, tables, times, hashes, uri
+import asyncdispatch, sequtils, strutils, strformat, tables, times, hashes, uri
 
 import jester
 
@@ -12,15 +12,16 @@ export times, hashes
 
 proc timelineRss*(req: Request; cfg: Config; query: Query): Future[Rss] {.async.} =
   var profile: Profile
+  var q = query
   let
     name = req.params.getOrDefault("name")
     after = getCursor(req)
     names = getNames(name)
+    count = parseInt(req.params.getOrDefault("count", "0"))
 
   if names.len == 1:
     profile = await fetchProfile(after, query, skipRail=true, skipPinned=true)
   else:
-    var q = query
     q.fromUser = names
     profile = Profile(
       tweets: await getSearch[Tweet](q, after),
@@ -34,6 +35,14 @@ proc timelineRss*(req: Request; cfg: Config; query: Query): Future[Rss] {.async.
 
   if profile.user.suspended:
     return Rss(feed: profile.user.username, cursor: "suspended")
+
+  if profile.tweets.content.len > 0:
+    while profile.tweets.content.len < count:
+      let moreTweets = await getSearch[Tweet](q, profile.tweets.bottom)
+      if moreTweets.content.len == 0:
+        break
+      profile.tweets.content = concat(profile.tweets.content, moreTweets.content)
+      profile.tweets.bottom = moreTweets.bottom
 
   if profile.user.fullname.len > 0:
     let rss = renderTimelineRss(profile, cfg, multi=(names.len > 1))
@@ -86,7 +95,8 @@ proc createRssRouter*(cfg: Config) =
       let
         cursor = getCursor()
         name = @"name"
-        key = &"twitter:{name}:{cursor}"
+        count = @"count"
+        key = &"twitter:{name}:{cursor}:{count}"
 
       var rss = await getCachedRss(key)
       if rss.cursor.len > 0:
